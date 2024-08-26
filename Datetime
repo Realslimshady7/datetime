@@ -1,0 +1,148 @@
+public void isProcessDateValid(Workflow workflow) {
+    try {
+        log.info("Checking if process date is valid: {}", Utils.getLogWorkFlowData(workflow));
+        Optional<DataFeedResult> dataResult = dataFeedResultRepository.findByReferenceNameId(workflow.getReferenceNameId());
+
+        if (!dataResult.isPresent()) {
+            throw createException("Data result not found for the given reference name ID.");
+        }
+
+        LocalDateTime processDateTime = dataResult.get().getProcessDate();
+        Long feedID = dataResult.get().getDataFeed().getDataFeedId();
+
+        ValidationControl validationControl = validationControlRepository.findByControlNameAndIsActiveAndStageId(
+                "ProcessDate",
+                true,
+                stageRepository.getStageByCodeNameAndIsActive(Constants.STAGE2_CODE_NAME, Boolean.TRUE).getStageId())
+                .stream().findFirst().orElse(new ValidationControl());
+
+        Optional<ValidationControlDataFeed> validationDataFeed = validationControlDataFeedRepository.findByDataFeedId(feedID)
+                .stream()
+                .filter(i -> i.isActive() && i.getValidationControls().getValidationControlId() == validationControl.getValidationControlId())
+                .findFirst();
+
+        if (!validationDataFeed.isPresent()) {
+            throw createException("Validation control data feed not found or not active.");
+        }
+
+        String validationMetaData = validationDataFeed.get().getValidationMetaData();
+
+        // Check if process date falls within the specified time and day range
+        boolean isValid = isWithinTimeAndDayRange(processDateTime, validationMetaData);
+
+        Long validationControlDataFeedResultId = saveValidationControlDataFeedResult(
+                dataResult.get().getDataFeedResultId(),
+                isValid,
+                LocalDateTime.now(),
+                processDateTime.toString(),
+                validationMetaData,
+                validationDataFeed.get().getValidationControlDataFeedId());
+
+        if (!isValid) {
+            // Save exception details if validation fails
+            saveValidationControlDataFeedResultException(
+                    validationControlDataFeedResultId,
+                    LocalDateTime.now(),
+                    "Process Date Range",
+                    "Process date does not fall within the allowed time and day range",
+                    workflow.getReferenceNameId() + " Process Date Range Validation",
+                    null);
+            throw createException("Process date does not fall within the allowed time and day range");
+        }
+
+    } catch (ValidateControlException e) {
+        log.error("Validation failed: {}", e.getMessage(), e);
+        updateWorkflowStatus(workflow, Constants.STAGE2_CODE_NAME, Constants.WORKFLOW_EXCEPTION);
+    } catch (Exception exception) {
+        log.error("Error during process date validation:", exception);
+        updateWorkflowStatus(workflow, Constants.STAGE2_CODE_NAME, Constants.WORKFLOW_EXCEPTION);
+    }
+}
+
+private boolean isWithinTimeAndDayRange(LocalDateTime processDateTime, String validationMetaData) {
+    DayOfWeek dayOfWeek = processDateTime.getDayOfWeek();
+    LocalTime time = processDateTime.toLocalTime();
+
+    // Parse validation metadata to get allowed time ranges
+    Map<DayOfWeek, LocalTime[]> allowedTimeRanges = parseValidationMetaData(validationMetaData);
+
+    if (!allowedTimeRanges.containsKey(dayOfWeek)) {
+        return false; // No validation data for the current day
+    }
+
+    LocalTime[] timeRange = allowedTimeRanges.get(dayOfWeek);
+    LocalTime startTime = timeRange[0];
+    LocalTime endTime = timeRange[1];
+
+    // Check if process time is within the allowed range
+    return !time.isBefore(startTime) && !time.isAfter(endTime);
+}
+
+private Map<DayOfWeek, LocalTime[]> parseValidationMetaData(String validationMetaData) {
+    Map<DayOfWeek, LocalTime[]> timeRanges = new HashMap<>();
+
+    // Split by day ranges (comma-separated)
+    String[] dayRanges = validationMetaData.split(",");
+    for (String dayRange : dayRanges) {
+        String[] parts = dayRange.trim().split(":");
+        String dayName = parts[0].trim();
+        String[] times = parts[1].trim().split("-");
+
+        LocalTime startTime = LocalTime.parse(times[0].trim());
+        LocalTime endTime = LocalTime.parse(times[1].trim());
+
+        // Convert day name to DayOfWeek enum
+        DayOfWeek dayOfWeek = DayOfWeek.valueOf(dayName.toUpperCase());
+
+        timeRanges.put(dayOfWeek, new LocalTime[]{startTime, endTime});
+    }
+
+    return timeRanges;
+}
+
+public Long saveValidationControlDataFeedResult(
+        Long dataFeedResultId,
+        Boolean validationResult,
+        LocalDateTime validationDate,
+        String expectedValue,
+        String actualValue,
+        int validationControlDataFeedId) {
+    ValidationControlDataFeedResult validationControlDataFeedResult = new ValidationControlDataFeedResult();
+    validationControlDataFeedResult.setDataFeedResultId(dataFeedResultId);
+    validationControlDataFeedResult.setValidationResult(validationResult);
+    validationControlDataFeedResult.setValidationDate(validationDate);
+    validationControlDataFeedResult.setExpectedValue(expectedValue);
+    validationControlDataFeedResult.setActualValue(actualValue);
+    validationControlDataFeedResult.setValidationControlDataFeedId(validationControlDataFeedId);
+    validationControlDataFeedResultRepository.save(validationControlDataFeedResult);
+    return validationControlDataFeedResult.getValidationControlDataFeedResultId();
+}
+
+public void saveValidationControlDataFeedResultException(
+        Long validationControlDataFeedResultId,
+        LocalDateTime exceptionDate,
+        String exceptionType,
+        String exceptionMessage,
+        String exceptionSource,
+        String exceptionSeverity) {
+    ValidationControlDataFeedResultException validationControlDataFeedResultException = new ValidationControlDataFeedResultException();
+    validationControlDataFeedResultException.setValidationControlDataFeedResultId(validationControlDataFeedResultId);
+    validationControlDataFeedResultException.setExceptionDate(exceptionDate);
+    validationControlDataFeedResultException.setExceptionType(exceptionType);
+    validationControlDataFeedResultException.setExceptionMessage(exceptionMessage);
+    validationControlDataFeedResultException.setExceptionSource(exceptionSource);
+    validationControlDataFeedResultException.setExceptionSeverity(exceptionSeverity);
+    validationControlDataFeedResultExceptionRepository.save(validationControlDataFeedResultException);
+}
+
+private ValidateControlException createException(String message) {
+    return new ValidateControlException(message);
+}
+
+private ValidateControlException createException(String message, Throwable cause) {
+    return new ValidateControlException(message, cause);
+}
+
+private void updateWorkflowStatus(Workflow workflow, String stageCodeName, String status) {
+    // Implement your logic to update workflow status
+}
